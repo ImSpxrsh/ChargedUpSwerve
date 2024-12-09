@@ -22,14 +22,23 @@ import frc.robot.classes.Position2D;
 import frc.robot.classes.SPIKE293Utils;
 import frc.robot.classes.SpikeBoard;
 
+import com.pathplanner.lib.auto.AutoBuilder;
+import com.pathplanner.lib.pathfinding.Pathfinding;
+import com.pathplanner.lib.util.HolonomicPathFollowerConfig;
+import com.pathplanner.lib.util.ReplanningConfig;
+
 import com.ctre.phoenix.motorcontrol.NeutralMode;
 import com.ctre.phoenix.motorcontrol.TalonFXControlMode;
 import com.ctre.phoenix.motorcontrol.TalonFXFeedbackDevice;
 import com.kauailabs.navx.frc.AHRS;
 
+import edu.wpi.first.math.controller.PIDController;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.wpilibj.SerialPort;
+import edu.wpi.first.math.util.Units;
+import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.DriverStation.Alliance;
 
 import java.util.Collections;
 import java.util.Enumeration;
@@ -70,6 +79,11 @@ public class Drivetrain extends SubsystemBase {
     public static final int CONFIG_FEEDBACKSENSOR_TIMEOUT_MS = 4000;
     public static final int MAX_VELOCITY = 23000;
     public static final double VELOCITY_LOWER_LIMIT = MAX_VELOCITY * 0.01;
+    private static final double MAX_LINEAR_SPEED = Units.feetToMeters(14.5);
+    private static final double TRACK_WIDTH_X = Units.inchesToMeters(21.73);
+    private static final double TRACK_WIDTH_Y = Units.inchesToMeters(21.73);
+    private static final double DRIVE_BASE_RADIUS = Math.hypot(TRACK_WIDTH_X / 2.0, TRACK_WIDTH_Y / 2.0);
+    private static final double MAX_ANGULAR_SPEED = MAX_LINEAR_SPEED / DRIVE_BASE_RADIUS;
 
     public static final boolean USE_NAVX_HEADING = false;
 
@@ -165,58 +179,40 @@ public class Drivetrain extends SubsystemBase {
 
     @Override
     public void periodic() {
-        // This method will be called once per scheduler run
-        // Put code here to be run every loop
-        // Run Kinematics
-        if (USE_NAVX_HEADING) {
-            // use the NAVX for heading
-            double headingInRadians = Math.toRadians(getGyroHeadingDegrees());
-            m_kinematics.calculatePosition(getLeftEncoderPosition(), getRightEncoderPosition(), headingInRadians);
-        } else {
-            // Use the encoder information for heading
-            m_kinematics.calculatePosition(getLeftEncoderPosition(), getRightEncoderPosition());
+        gryoIO.updateInputs(gyroinputs);
+        for(var module : modules) {
+            module.updateInputs();
         }
 
-        // Get current pose from Kinematics
-        Position2D currentPose = m_kinematics.getPose();
+        for(var module : modules) {
+            module.periodic;
+        }
 
-        // Log Position w/ Pose2d class
-        Pose2d currentPose2d = new Pose2d(currentPose.getX(), currentPose.getY(),
-                Rotation2d.fromDegrees(currentPose.getHeadingDegrees()));
-        Logger.getInstance().recordOutput("odometry", currentPose2d);
-
-        Hashtable<String, Double> doubleVals = new Hashtable<String, Double>() {
-            {
-                put("Kinematics X (Feet)", currentPose.getX());
-                put("Kinematics Y (Feet)", currentPose.getY());
-                put("Kinematics Heading (degrees)", currentPose.getHeadingDegrees());
-                put("Left Encoder Velocity (Ft per S)", getLeftEncoderVelocity());
-                put("Left Encoder Position (Ft)", getLeftEncoderPosition());
-                put("Right Encoder Veloctiy (Ft per S)", getRightEncoderVelocity());
-                put("Right Encoder Position (Ft)", getRightEncoderPosition());
-                put("Raw Left Encoder", leftTalonLead.getSelectedSensorPosition(0));
-                put("Raw Right Encoder", rightTalonLead.getSelectedSensorPosition(0));
-
-                put("Robot Heading (degrees)", getGyroHeadingDegrees());
-                put("NavX X Accel", (double) navX.getWorldLinearAccelX());
-                put("NavX Y Accel", (double) navX.getWorldLinearAccelY());
-                put("NavX Z Accel", (double) navX.getWorldLinearAccelZ());
-                put("NavX Yaw", getGyroYawDegrees());
-                put("NavX Pitch", getGyroPitchDegrees());
-                put("NavX Angle", getGyroHeadingDegrees());
-                put("NavX Fused Heading", getGyroFusedHeadingDegrees());
-                put("NavX TurnRate dg per s", navX.getRate());
-
-                put("Left Motor Position Error", leftTalonLead.getClosedLoopError(0));
-                put("Right Motor Position Error", rightTalonLead.getClosedLoopError(0));
+        if(Driverstation.isDisbaled()) {
+            for(var module : modules) {
+                module.stop();
             }
-        };
-        Enumeration<String> doubleValsKeys = doubleVals.keys();
-        for (String key : Collections.list(doubleValsKeys)) {
-            double val = doubleVals.get(key);
-            SmartDashboard.putNumber(key, val);
-            Drivetrain.getTab().setDouble(key, val);
+            setTargetDirection(getRotation().getDegrees());
         }
+
+        int deltaCount = INTEGER.MAX_VALUE;
+
+        for(int i = 0; i < 4; i++) {
+            deltaCount = Math.min(deltaCount, modules[i].getPositionDeltas().length);
+        }
+        for(int deltaIndex = 0; deltaIndex < deltaCount; deltaIndex++) {
+            SwerveModulePosition[] wheelDeltas = new SwerveModulePostion[4];
+            for(int moduleIndex = 0; moduleIndex < 4; moduleIndex++) {
+                wheelDeltas[moduleIndex] = modules[moduleIndex].getPositionDeltas()[deltaIndex];
+            }
+            var twist = kinematics.toTwist2d(wheelDeltas);
+            if (gyroInputs.connected) {
+                Rotation2d gryoRotation = gyroInputs.yawPosition;
+                twist = new Twist2d (twist.dx,twist.dy,gyroRotation.minus(lastGyroRotation).getRadians() / deltaCount);
+            }
+        pose = pose.exp(twist);
+        }
+        lastGyroRotation = gyroInputs.yawPosition;
     }
 
     public void percentDrive(double leftPercentage, double rightPercentage) {
